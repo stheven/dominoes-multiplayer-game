@@ -175,3 +175,15 @@ dist
 #!! ERROR: typescript is undefined. Use list command to see defined gitignore types !!#
 
 # End of https://www.toptal.com/developers/gitignore/api/node,typescript,nextjs
+
+# firebase
+firebase/firebase-data
+firebase/**/*.log
+firebase/**/*.json
+firebase/**/*metadata*
+!firebase/firebase.json
+
+playwright-report
+test-results
+.pnpm-store
+.features-gen

@@ -1,0 +1,81 @@
+services:
+  traefik:
+    image: traefik:latest
+    environment:
+      - DOCKER_API_VERSION=1.44
+    command:
+      - '--api.insecure=true'
+      - '--providers.docker=true'
+      - '--providers.docker.exposedbydefault=false'
+      - '--entrypoints.web.address=:80'
+    ports:
+      - '80:80'
+      - '8081:8080'
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  webapp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: base
+    volumes:
+      - .:/app
+    working_dir: /app/apps/webapp
+    command: pnpm run dev
+    environment:
+      - NODE_ENV=development
+      - NEXT_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST=auth.${APP_NAME}.firebase.localhost
+      - NEXT_PUBLIC_FIREBASE_FIRESTORE_EMULATOR_HOST=firestore.${APP_NAME}.firebase.localhost
+      - NEXT_PUBLIC_FIREBASE_PROJECT_ID=demo-${APP_NAME}
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.webapp.rule=Host(`webapp.${APP_NAME}.localhost`)'
+      - 'traefik.http.services.webapp.loadbalancer.server.port=3000'
+    depends_on:
+      - firebase-emulators
+
+  firebase-emulators:
+    image: andreysenov/firebase-tools:latest
+    environment:
+      - GCLOUD_PROJECT=demo-${APP_NAME}
+    working_dir: /app
+    volumes:
+      - ./firebase:/app
+    command: firebase emulators:start --project demo-${APP_NAME} --import=./firebase-data --export-on-exit
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.firebase-ui.rule=Host(`${APP_NAME}.firebase.localhost`)'
+      - 'traefik.http.routers.firebase-ui.service=firebase-ui-svc'
+      - 'traefik.http.services.firebase-ui-svc.loadbalancer.server.port=4000'
+      - 'traefik.http.routers.firebase-auth.rule=Host(`auth.${APP_NAME}.firebase.localhost`)'
+      - 'traefik.http.routers.firebase-auth.service=firebase-auth-svc'
+      - 'traefik.http.services.firebase-auth-svc.loadbalancer.server.port=9099'
+      - 'traefik.http.routers.firebase-db.rule=Host(`firestore.${APP_NAME}.firebase.localhost`)'
+      - 'traefik.http.routers.firebase-db.service=firebase-db-svc'
+      - 'traefik.http.services.firebase-db-svc.loadbalancer.server.port=8080'
+
+  # e2e:
+  #   build:
+  #     dockerfile: ./Dockerfile.e2e
+  #     context: .
+  #     target: base
+  #     args:
+  #       - UID=${UID:-1000}
+  #       - GID=${GID:-1000}
+  #   env_file:
+  #     - .env
+  #   ports:
+  #     - 8000:8000
+  #     - 9323:9323
+  #   user: "1000"
+  #   volumes:
+  #     - ./:/usr/app:rw
+  #     - /tmp/.X11-unix:/tmp/.X11-unix
+  #   working_dir: /usr/app/apps/e2e
+  #   # entrypoint: ["sh", "-c", "pnpm run e2e"]
+  #   entrypoint: [ "sh", "-c", "tail -F anything" ]
+  #   environment:
+  #     - DISPLAY=:0
+  #   depends_on:
+  #     - webapp

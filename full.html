@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>3D Multiplayer Dominoes</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Dependencies -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+    <!-- React Three Fiber and Drei UMD builds -->
+    <script src="https://unpkg.com/@react-three/fiber@8.15.11/dist/react-three-fiber.umd.js"></script>
+    <script src="https://unpkg.com/@react-three/drei@9.88.11/dist/index.umd.js"></script>
+
+    <style>
+      body {
+        margin: 0;
+        background: #0a0a0a;
+        color: white;
+        font-family: sans-serif;
+        overflow: hidden;
+      }
+      .no-scrollbar::-webkit-scrollbar {
+        display: none;
+      }
+      .no-scrollbar {
+        -ms-overflow-style: none;
+        scrollbar-width: none;
+      }
+      canvas {
+        touch-action: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <!-- Firebase SDKs -->
+    <script type="module">
+      import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js'
+      import {
+        getAuth,
+        signInAnonymously,
+        onAuthStateChanged,
+        signInWithCustomToken,
+      } from 'https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js'
+      import {
+        getFirestore,
+        doc,
+        setDoc,
+        updateDoc,
+        onSnapshot,
+        collection,
+        query,
+      } from 'https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js'
+
+      window.FB = {
+        initializeApp,
+        getAuth,
+        signInAnonymously,
+        onAuthStateChanged,
+        signInWithCustomToken,
+        getFirestore,
+        doc,
+        setDoc,
+        updateDoc,
+        onSnapshot,
+        collection,
+        query,
+      }
+      window.dispatchEvent(new Event('firebase-ready'))
+    </script>
+
+    <!-- Application Code -->
+    <script type="text/babel">
+      const { useState, useEffect, useMemo, useRef, Suspense } = React
+
+      const TILE_W = 0.5,
+        TILE_H = 1.0,
+        TILE_D = 0.15
+
+      const generateDeck = () => {
+        const tiles = []
+        for (let i = 0; i <= 6; i++) {
+          for (let j = i; j <= 6; j++) {
+            tiles.push({ id: `t-${i}-${j}-${Math.random()}`, sides: [i, j] })
+          }
+        }
+        return tiles.sort(() => Math.random() - 0.5)
+      }
+
+      // Resilient Helper to get R3F/Drei from window based on UMD export names
+      const getLibs = () => {
+        const rtf = window.ReactThreeFiber
+        const drei = window.drei // UMD for @react-three/drei often attaches to window.drei
+        return { rtf, drei }
+      }
+
+      function Domino({ sides, position, rotation, color = '#ffffff' }) {
+        const pips = (val, offset) => {
+          const map = {
+            0: [],
+            1: [[0, 0]],
+            2: [
+              [-0.15, 0.15],
+              [0.15, -0.15],
+            ],
+            3: [
+              [-0.15, 0.15],
+              [0, 0],
+              [0.15, -0.15],
+            ],
+            4: [
+              [-0.15, 0.15],
+              [0.15, 0.15],
+              [-0.15, -0.15],
+              [0.15, -0.15],
+            ],
+            5: [
+              [-0.15, 0.15],
+              [0.15, 0.15],
+              [0, 0],
+              [-0.15, -0.15],
+              [0.15, -0.15],
+            ],
+            6: [
+              [-0.15, 0.15],
+              [0.15, 0.15],
+              [-0.15, 0],
+              [0.15, 0],
+              [-0.15, -0.15],
+              [0.15, -0.15],
+            ],
+          }
+          return map[val].map((p, i) => (
+            <mesh key={i} position={[p[0], offset + p[1], TILE_D / 2 + 0.005]}>
+              <circleGeometry args={[0.04, 16]} />
+              <meshBasicMaterial color='#111' />
+            </mesh>
+          ))
+        }
+
+        const { drei } = getLibs()
+        const RoundedBox = drei.RoundedBox
+
+        return (
+          <group position={position} rotation={rotation}>
+            <RoundedBox args={[TILE_W, TILE_H, TILE_D]} radius={0.04} smoothness={4}>
+              <meshStandardMaterial color={color} roughness={0.2} metalness={0.1} />
+            </RoundedBox>
+            <mesh position={[0, 0, TILE_D / 2 + 0.001]}>
+              <planeGeometry args={[TILE_W * 0.8, 0.015]} />
+              <meshBasicMaterial color='#444' />
+            </mesh>
+            {pips(sides[0], 0.25)}
+            {pips(sides[1], -0.25)}
+          </group>
+        )
+      }
+
+      function Scene({ roomData, userId }) {
+        const isMyTurn = roomData.turn === userId
+        const isPlayer = roomData.players.includes(userId)
+        const { drei } = getLibs()
+        const { OrbitControls, Text, Float, ContactShadows } = drei
+
+        return (
+          <React.Fragment>
+            <color attach='background' args={['#050505']} />
+            <ambientLight intensity={1.2} />
+            <pointLight position={[10, 10, 10]} intensity={1} castShadow />
+            <spotLight position={[-5, 5, 5]} angle={0.2} penumbra={1} intensity={2} />
+
+            <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.1, 0]} receiveShadow>
+              <planeGeometry args={[50, 50]} />
+              <meshStandardMaterial color='#111' roughness={0.9} />
+            </mesh>
+
+            <group>
+              {roomData.board.map((t, idx) => (
+                <Domino
+                  key={t.id || idx}
+                  sides={t.sides}
+                  position={t.position || [idx * 0.6 - 2, 0, 0]}
+                  rotation={t.rotation || [Math.PI / 2, 0, 0]}
+                />
+              ))}
+            </group>
+
+            <OrbitControls makeDefault maxPolarAngle={Math.PI / 2.2} />
+            <ContactShadows opacity={0.5} scale={10} blur={2} far={10} />
+
+            <Float speed={1.5} rotationIntensity={0.1} floatIntensity={0.2}>
+              <Text position={[0, 3, -5]} fontSize={0.5} color='white'>
+                {!isPlayer ? 'SPECTATING' : isMyTurn ? 'YOUR TURN' : 'WAITING...'}
+              </Text>
+            </Float>
+          </React.Fragment>
+        )
+      }
+
+      function App() {
+        const [libsReady, setLibsReady] = useState(false)
+        const [fbReady, setFbReady] = useState(!!window.FB)
+        const [user, setUser] = useState(null)
+        const [roomName, setRoomName] = useState('')
+        const [rooms, setRooms] = useState([])
+        const [currentRoom, setCurrentRoom] = useState(null)
+        const [view, setView] = useState('lobby')
+
+        const firebaseConfig = JSON.parse(__firebase_config)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'domino-3d-v1'
+
+        useEffect(() => {
+          let attempts = 0
+          const checkLibs = () => {
+            const { rtf, drei } = getLibs()
+            if (rtf && drei && drei.RoundedBox) {
+              setLibsReady(true)
+            } else if (attempts < 100) {
+              attempts++
+              setTimeout(checkLibs, 100)
+            } else {
+              console.error('Failed to load 3D libraries (R3F/Drei)', { rtf: !!rtf, drei: !!drei })
+            }
+          }
+          checkLibs()
+
+          const handleFbReady = () => setFbReady(true)
+          window.addEventListener('firebase-ready', handleFbReady)
+          return () => window.removeEventListener('firebase-ready', handleFbReady)
+        }, [])
+
+        useEffect(() => {
+          if (!fbReady) return
+          const { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, initializeApp } = window.FB
+          const app = initializeApp(firebaseConfig)
+          const auth = getAuth(app)
+
+          const initAuth = async () => {
+            try {
+              if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                await signInWithCustomToken(auth, __initial_auth_token)
+              } else {
+                await signInAnonymously(auth)
+              }
+            } catch (e) {
+              console.error('Auth error', e)
+            }
+          }
+          initAuth()
+          const unsubscribe = onAuthStateChanged(auth, setUser)
+          return () => unsubscribe()
+        }, [fbReady])
+
+        useEffect(() => {
+          if (!user || !fbReady) return
+          const { getFirestore, collection, onSnapshot, initializeApp, query } = window.FB
+          const app = initializeApp(firebaseConfig)
+          const db = getFirestore(app)
+
+          const roomsCol = collection(db, 'artifacts', appId, 'public', 'data', 'rooms')
+          const q = query(roomsCol)
+
+          const unsubscribe = onSnapshot(
+            q,
+            (snap) => {
+              setRooms(snap.docs.map((d) => ({ id: d.id, ...d.data() })))
+            },
+            (error) => {
+              console.error('Rooms snapshot error', error)
+            },
+          )
+          return () => unsubscribe()
+        }, [user, fbReady, appId])
+
+        const handleCreate = async () => {
+          if (!roomName.trim() || !user) return
+          const { getFirestore, doc, setDoc, initializeApp } = window.FB
+          const app = initializeApp(firebaseConfig)
+          const db = getFirestore(app)
+
+          const deck = generateDeck()
+          const myHand = deck.splice(0, 7)
+          const roomRef = doc(db, 'artifacts', appId, 'public', 'data', 'rooms', roomName)
+
+          try {
+            await setDoc(roomRef, {
+              players: [user.uid],
+              hands: { [user.uid]: myHand },
+              boneyard: deck,
+              board: [],
+              turn: user.uid,
+              status: 'waiting',
+              createdAt: Date.now(),
+            })
+            join(roomName)
+          } catch (e) {
+            console.error('Create room error', e)
+          }
+        }
+
+        const join = (id) => {
+          const { getFirestore, doc, updateDoc, onSnapshot, initializeApp } = window.FB
+          const app = initializeApp(firebaseConfig)
+          const db = getFirestore(app)
+          const ref = doc(db, 'artifacts', appId, 'public', 'data', 'rooms', id)
+
+          const unsubscribe = onSnapshot(
+            ref,
+            async (snap) => {
+              const data = snap.data()
+              if (!data) return
+
+              if (data.players.length < 2 && !data.players.includes(user.uid)) {
+                const deck = [...data.boneyard]
+                const hand = deck.splice(0, 7)
+                await updateDoc(ref, {
+                  players: [...data.players, user.uid],
+                  [`hands.${user.uid}`]: hand,
+                  boneyard: deck,
+                  status: 'playing',
+                })
+              }
+              setCurrentRoom({ id, ...data })
+              setView('game')
+            },
+            (error) => {
+              console.error('Join room snapshot error', error)
+            },
+          )
+          return () => unsubscribe()
+        }
+
+        const play = async (tile) => {
+          if (!user || !currentRoom || currentRoom.turn !== user.uid) return
+          const { getFirestore, doc, updateDoc, initializeApp } = window.FB
+          const app = initializeApp(firebaseConfig)
+          const db = getFirestore(app)
+          const ref = doc(db, 'artifacts', appId, 'public', 'data', 'rooms', currentRoom.id)
+
+          const newBoard = [
+            ...currentRoom.board,
+            {
+              ...tile,
+              position: [currentRoom.board.length * 0.6 - 1.5, 0, (Math.random() - 0.5) * 0.1],
+              rotation: [Math.PI / 2, 0, (Math.random() - 0.5) * 0.2],
+            },
+          ]
+          const nextHand = currentRoom.hands[user.uid].filter((t) => t.id !== tile.id)
+          const nextPlayer = currentRoom.players.find((p) => p !== user.uid) || user.uid
+
+          try {
+            await updateDoc(ref, {
+              board: newBoard,
+              [`hands.${user.uid}`]: nextHand,
+              turn: nextPlayer,
+            })
+          } catch (e) {
+            console.error('Play tile error', e)
+          }
+        }
+
+        if (!user || !libsReady)
+          return (
+            <div className='h-screen flex flex-col items-center justify-center bg-black text-white font-mono uppercase tracking-widest gap-4'>
+              <div className='animate-spin w-8 h-8 border-4 border-yellow-500 border-t-transparent rounded-full'></div>
+              <div>Initialising Game Assets...</div>
+            </div>
+          )
+
+        if (view === 'lobby') {
+          return (
+            <div className='h-screen flex items-center justify-center bg-[#0a0a0a] p-4'>
+              <div className='w-full max-w-md bg-neutral-900 border border-neutral-800 p-8 rounded-3xl shadow-2xl'>
+                <h1 className='text-3xl font-black text-center text-white mb-8 tracking-tighter'>
+                  DOMINO <span className='text-yellow-500'>3D</span>
+                </h1>
+                <div className='space-y-4 mb-10'>
+                  <input
+                    className='w-full bg-neutral-800 border-none p-4 rounded-xl text-white outline-none'
+                    placeholder='Room Name...'
+                    value={roomName}
+                    onChange={(e) => setRoomName(e.target.value)}
+                  />
+                  <button
+                    onClick={handleCreate}
+                    className='w-full bg-yellow-500 hover:bg-yellow-400 text-black font-bold py-4 rounded-xl transition-colors'
+                  >
+                    CREATE ROOM
+                  </button>
+                </div>
+                <div className='space-y-3'>
+                  <h2 className='text-xs font-bold text-neutral-500 uppercase tracking-widest px-1'>Live Lobbies</h2>
+                  <div className='max-h-60 overflow-y-auto pr-1 no-scrollbar space-y-2'>
+                    {rooms.map((r) => (
+                      <div
+                        key={r.id}
+                        className='flex items-center justify-between bg-neutral-800/50 p-4 rounded-xl border border-neutral-800'
+                      >
+                        <span className='text-white font-medium'>{r.id}</span>
+                        <button
+                          onClick={() => join(r.id)}
+                          className='bg-white text-black px-4 py-1.5 rounded-lg text-xs font-black hover:bg-neutral-200'
+                        >
+                          {r.players.length >= 2 ? 'WATCH' : 'JOIN'}
+                        </button>
+                      </div>
+                    ))}
+                    {rooms.length === 0 && (
+                      <p className='text-neutral-600 text-center py-4 text-xs italic'>No active lobbies found.</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )
+        }
+
+        const { rtf } = getLibs()
+        const { Canvas } = rtf
+
+        return (
+          <div className='relative w-full h-screen'>
+            <Suspense fallback={null}>
+              <Canvas shadows camera={{ position: [5, 5, 5], fov: 45 }}>
+                <Scene roomData={currentRoom} userId={user.uid} />
+              </Canvas>
+            </Suspense>
+            <div className='absolute top-8 left-8 p-5 bg-black/80 rounded-2xl border border-white/10 pointer-events-none'>
+              <div className='text-[10px] text-neutral-500 font-bold uppercase mb-1 tracking-widest'>
+                Room: {currentRoom.id}
+              </div>
+              <div
+                className={`text-xl font-black ${currentRoom.turn === user.uid ? 'text-green-400' : 'text-yellow-500'}`}
+              >
+                {currentRoom.turn === user.uid ? 'YOUR TURN' : "OPPONENT'S TURN"}
+              </div>
+            </div>
+            <div className='absolute bottom-10 left-0 w-full px-10'>
+              <div className='max-w-4xl mx-auto flex flex-col items-center gap-8'>
+                {currentRoom.players.includes(user.uid) && (
+                  <div className='flex gap-3 overflow-x-auto pb-6 max-w-full no-scrollbar'>
+                    {currentRoom.hands[user.uid]?.map((t) => (
+                      <button
+                        key={t.id}
+                        disabled={currentRoom.turn !== user.uid}
+                        onClick={() => play(t)}
+                        className={`flex-shrink-0 w-16 h-28 bg-white rounded-xl flex flex-col items-center justify-between p-2 transition-all ${currentRoom.turn === user.uid ? 'hover:-translate-y-6 border-4 border-yellow-500' : 'opacity-40 grayscale'}`}
+                      >
+                        <span className='text-black text-2xl font-black'>{t.sides[0]}</span>
+                        <div className='w-full h-0.5 bg-neutral-200' />
+                        <span className='text-black text-2xl font-black'>{t.sides[1]}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <button
+                  onClick={() => setView('lobby')}
+                  className='text-neutral-500 hover:text-white text-xs font-bold uppercase tracking-widest'
+                >
+                  Leave Game
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      }
+
+      const root = ReactDOM.createRoot(document.getElementById('root'))
+      root.render(<App />)
+    </script>
+  </body>
+</html>
