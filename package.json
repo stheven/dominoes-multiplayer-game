@@ -1,0 +1,10 @@
+{
+  "name": "dominoes",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Monorepo for dominoes multiplayer game",
+  "scripts": {
+    "dev": "pnpm --filter @dominoes/webapp run dev"
+  },
+  "packageManager": "pnpm@10.26.2"
+}
